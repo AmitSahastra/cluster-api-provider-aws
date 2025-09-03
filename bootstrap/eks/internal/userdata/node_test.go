@@ -24,6 +24,9 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
 	"k8s.io/utils/ptr"
+
+	eksbootstrapv1 "sigs.k8s.io/cluster-api-provider-aws/v2/bootstrap/eks/api/v1beta2"
+	"sigs.k8s.io/cluster-api-provider-aws/v2/exp/api/v1beta2"
 )
 
 func TestNewNode(t *testing.T) {
@@ -33,6 +36,9 @@ func TestNewNode(t *testing.T) {
 	type args struct {
 		input *NodeInput
 	}
+
+	onDemandCapacity := v1beta2.ManagedMachinePoolCapacityTypeOnDemand
+	spotCapacity := v1beta2.ManagedMachinePoolCapacityTypeSpot
 
 	tests := []struct {
 		name         string
@@ -75,7 +81,6 @@ func TestNewNode(t *testing.T) {
 			},
 			expectErr: false,
 			verifyOutput: func(output string) bool {
-				fmt.Println(output)
 				return strings.Contains(output, "node-role.undistro.io/infra=true") &&
 					strings.Contains(output, "register-with-taints") &&
 					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
@@ -144,8 +149,274 @@ func TestNewNode(t *testing.T) {
 			},
 			expectErr: false,
 			verifyOutput: func(output string) bool {
-				fmt.Println(output)
-				return strings.Contains(output, `"--node-labels=app=my-app,environment=production"`)
+				return strings.Contains(output, `"--node-labels=app=my-app,environment=production,eks.amazonaws.com/nodegroup=test-nodegroup,eks.amazonaws.com/capacityType=ON_DEMAND"`)
+			},
+		},
+		{
+			name: "cloud-config part when NTP is set",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					NTP: &eksbootstrapv1.NTP{
+						Enabled: ptr.To(true),
+						Servers: []string{"time.google.com"},
+					},
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "Content-Type: text/cloud-config") &&
+					strings.Contains(output, "#cloud-config") &&
+					strings.Contains(output, "time.google.com") &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
+			},
+		},
+		{
+			name: "cloud-config part when Users is set",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					Users: []eksbootstrapv1.User{
+						{
+							Name:              "testuser",
+							SSHAuthorizedKeys: []string{"ssh-rsa AAAAB3..."},
+						},
+					},
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "Content-Type: text/cloud-config") &&
+					strings.Contains(output, "#cloud-config") &&
+					strings.Contains(output, "testuser") &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
+			},
+		},
+		{
+			name: "cloud-config part when DiskSetup is set",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					DiskSetup: &eksbootstrapv1.DiskSetup{
+						Filesystems: []eksbootstrapv1.Filesystem{
+							{
+								Device:     "/dev/disk/azure/scsi1/lun0",
+								Filesystem: "ext4",
+								Label:      "etcd_disk",
+							},
+						},
+					},
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "Content-Type: text/cloud-config") &&
+					strings.Contains(output, "#cloud-config") &&
+					strings.Contains(output, "/dev/disk/azure/scsi1/lun0") &&
+					strings.Contains(output, "ext4") &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
+			},
+		},
+		{
+			name: "cloud-config part when Mounts is set",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					Mounts: []eksbootstrapv1.MountPoints{
+						eksbootstrapv1.MountPoints{"/dev/disk/azure/scsi1/lun0"},
+						eksbootstrapv1.MountPoints{"/mnt/etcd"},
+					},
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "Content-Type: text/cloud-config") &&
+					strings.Contains(output, "#cloud-config") &&
+					strings.Contains(output, "/dev/disk/azure/scsi1/lun0") &&
+					strings.Contains(output, "/mnt/etcd") &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
+			},
+		},
+		{
+			name: "boundary verification - all three parts with custom boundary",
+			args: args{
+				input: &NodeInput{
+					ClusterName:           "test-cluster",
+					APIServerEndpoint:     "https://example.com",
+					CACert:                "test-ca-cert",
+					NodeGroupName:         "test-nodegroup",
+					Boundary:              "CUSTOMBOUNDARY123",
+					PreBootstrapCommands:  []string{"echo 'pre-bootstrap'"},
+					PostBootstrapCommands: []string{"echo 'post-bootstrap'"},
+					NTP: &eksbootstrapv1.NTP{
+						Enabled: ptr.To(true),
+						Servers: []string{"time.google.com"},
+					},
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				boundary := "CUSTOMBOUNDARY123"
+				return strings.Contains(output, fmt.Sprintf(`boundary="%s"`, boundary)) &&
+					strings.Contains(output, fmt.Sprintf("--%s", boundary)) &&
+					strings.Contains(output, fmt.Sprintf("--%s--", boundary)) &&
+					strings.Contains(output, "Content-Type: application/node.eks.aws") &&
+					strings.Contains(output, "Content-Type: text/x-shellscript") &&
+					strings.Contains(output, "Content-Type: text/cloud-config") &&
+					strings.Count(output, fmt.Sprintf("--%s", boundary)) == 6 // 3 parts * 2 boundaries each
+			},
+		},
+		{
+			name: "boundary verification - only node config part with default boundary",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				boundary := "//" // default boundary
+				return strings.Contains(output, fmt.Sprintf(`boundary="%s"`, boundary)) &&
+					strings.Contains(output, fmt.Sprintf("--%s", boundary)) &&
+					strings.Contains(output, fmt.Sprintf("--%s--", boundary)) &&
+					strings.Contains(output, "Content-Type: application/node.eks.aws") &&
+					!strings.Contains(output, "Content-Type: text/x-shellscript") &&
+					!strings.Contains(output, "Content-Type: text/cloud-config")
+			},
+		},
+		{
+			name: "boundary verification - shell script and node config parts only",
+			args: args{
+				input: &NodeInput{
+					ClusterName:          "test-cluster",
+					APIServerEndpoint:    "https://example.com",
+					CACert:               "test-ca-cert",
+					NodeGroupName:        "test-nodegroup",
+					PreBootstrapCommands: []string{"echo 'test'"},
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				boundary := "//" // default boundary
+				return strings.Contains(output, fmt.Sprintf(`boundary="%s"`, boundary)) &&
+					strings.Contains(output, "Content-Type: application/node.eks.aws") &&
+					strings.Contains(output, "Content-Type: text/x-shellscript") &&
+					!strings.Contains(output, "Content-Type: text/cloud-config") &&
+					strings.Count(output, fmt.Sprintf("--%s", boundary)) >= 4 // 2 parts * 2 boundaries each
+			},
+		},
+		{
+			name: "node-labels without capacityType - should add ON_DEMAND",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					AMIImageID:        "ami-123456",
+					KubeletExtraArgs: map[string]string{
+						"node-labels": "app=my-app,environment=production",
+					},
+					CapacityType: nil, // Should default to ON_DEMAND
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "app=my-app,environment=production") &&
+					strings.Contains(output, "eks.amazonaws.com/nodegroup-image=ami-123456") &&
+					strings.Contains(output, "eks.amazonaws.com/nodegroup=test-nodegroup") &&
+					strings.Contains(output, "eks.amazonaws.com/capacityType=ON_DEMAND") &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
+			},
+		},
+		{
+			name: "node-labels with capacityType set to SPOT",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					AMIImageID:        "ami-123456",
+					KubeletExtraArgs: map[string]string{
+						"node-labels": "workload=batch",
+					},
+					CapacityType: &spotCapacity,
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "workload=batch") &&
+					strings.Contains(output, "eks.amazonaws.com/nodegroup-image=ami-123456") &&
+					strings.Contains(output, "eks.amazonaws.com/nodegroup=test-nodegroup") &&
+					strings.Contains(output, "eks.amazonaws.com/capacityType=SPOT") &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
+			},
+		},
+		{
+			name: "no existing node-labels - should only add generated labels",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					AMIImageID:        "ami-789012",
+					KubeletExtraArgs: map[string]string{
+						"max-pods": "100",
+						// No node-labels
+					},
+					CapacityType: &spotCapacity,
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "--node-labels=eks.amazonaws.com/nodegroup-image=ami-789012") &&
+					strings.Contains(output, "eks.amazonaws.com/nodegroup=test-nodegroup") &&
+					strings.Contains(output, "eks.amazonaws.com/capacityType=SPOT") &&
+					strings.Contains(output, `"--max-pods=100"`) &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
+			},
+		},
+		{
+			name: "verify other kubelet args are preserved with node-labels",
+			args: args{
+				input: &NodeInput{
+					ClusterName:       "test-cluster",
+					APIServerEndpoint: "https://example.com",
+					CACert:            "test-ca-cert",
+					NodeGroupName:     "test-nodegroup",
+					KubeletExtraArgs: map[string]string{
+						"node-labels":          "tier=workers",
+						"register-with-taints": "dedicated=gpu:NoSchedule",
+						"max-pods":             "58",
+					},
+					CapacityType: &onDemandCapacity,
+				},
+			},
+			expectErr: false,
+			verifyOutput: func(output string) bool {
+				return strings.Contains(output, "--node-labels=tier=workers,") &&
+					strings.Contains(output, "eks.amazonaws.com/nodegroup=test-nodegroup") &&
+					strings.Contains(output, "eks.amazonaws.com/capacityType=ON_DEMAND") &&
+					strings.Contains(output, `"--register-with-taints=dedicated=gpu:NoSchedule"`) &&
+					strings.Contains(output, `"--max-pods=58"`) &&
+					strings.Contains(output, "apiVersion: node.eks.aws/v1alpha1")
 			},
 		},
 		{

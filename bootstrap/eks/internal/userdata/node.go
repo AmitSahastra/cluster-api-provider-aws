@@ -22,7 +22,6 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/alessio/shellescape"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
@@ -31,25 +30,32 @@ import (
 )
 
 const (
-	defaultBootstrapCommand = "/etc/eks/bootstrap.sh"
-	boundary                = "//"
+	boundary = "//"
 
-	nodeUserData = `#cloud-config
+	nodeUserData = `
+--{{.Boundary}}
+Content-Type: text/cloud-config
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="cloud-config.yaml"
+
+#cloud-config
 {{template "files" .Files}}
 runcmd:
-{{- template "commands" .PreBootstrapCommands }}
-  - {{ .BootstrapCommand }} {{.ClusterName}} {{- template "args" . }}
-{{- template "commands" .PostBootstrapCommands }}
 {{- template "ntp" .NTP }}
 {{- template "users" .Users }}
 {{- template "disk_setup" .DiskSetup}}
 {{- template "fs_setup" .DiskSetup}}
 {{- template "mounts" .Mounts}}
-`
+--{{.Boundary}}--`
 
 	// Shell script part template for nodeadm.
-	shellScriptPartTemplate = `--{{.Boundary}}
+	shellScriptPartTemplate = `
+--{{.Boundary}}
 Content-Type: text/x-shellscript; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="commands.sh"
 
 #!/bin/bash
 set -o errexit
@@ -63,7 +69,8 @@ set -o nounset
 {{- range .PostBootstrapCommands}}
 {{.}}
 {{- end}}
-{{- end}}`
+{{- end}}
+--{{ .Boundary }}--`
 
 	// Node config part template for nodeadm.
 	nodeConfigPartTemplate = `
@@ -143,24 +150,6 @@ type PauseContainerInfo struct {
 	Version       *string
 }
 
-// DockerConfigJSONEscaped returns the DockerConfigJSON escaped for use in cloud-init.
-func (ni *NodeInput) DockerConfigJSONEscaped() string {
-	if ni.DockerConfigJSON == nil || len(*ni.DockerConfigJSON) == 0 {
-		return "''"
-	}
-
-	return shellescape.Quote(*ni.DockerConfigJSON)
-}
-
-// BootstrapCommand returns the bootstrap command to be used on a node instance.
-func (ni *NodeInput) BootstrapCommand() string {
-	if ni.BootstrapCommandOverride != nil && *ni.BootstrapCommandOverride != "" {
-		return *ni.BootstrapCommandOverride
-	}
-
-	return defaultBootstrapCommand
-}
-
 // NewNode returns the user data string to be used on a node instance.
 func NewNode(input *NodeInput) ([]byte, error) {
 	if err := validateNodeInput(input); err != nil {
@@ -191,26 +180,66 @@ func NewNode(input *NodeInput) ([]byte, error) {
 		return nil, fmt.Errorf("failed to execute node config template: %v", err)
 	}
 
+	// Write cloud-config part
+	tm := template.New("Node").Funcs(defaultTemplateFuncMap)
+	// if any of the input fields are set, we need to write the cloud-config part
+	if input.NTP != nil || input.DiskSetup != nil || input.Mounts != nil || input.Users != nil {
+		if _, err := tm.Parse(filesTemplate); err != nil {
+			return nil, fmt.Errorf("failed to parse args template: %w", err)
+		}
+		if _, err := tm.Parse(ntpTemplate); err != nil {
+			return nil, fmt.Errorf("failed to parse ntp template: %w", err)
+		}
+
+		if _, err := tm.Parse(usersTemplate); err != nil {
+			return nil, fmt.Errorf("failed to parse users template: %w", err)
+		}
+
+		if _, err := tm.Parse(diskSetupTemplate); err != nil {
+			return nil, fmt.Errorf("failed to parse disk setup template: %w", err)
+		}
+
+		if _, err := tm.Parse(fsSetupTemplate); err != nil {
+			return nil, fmt.Errorf("failed to parse fs setup template: %w", err)
+		}
+
+		if _, err := tm.Parse(mountsTemplate); err != nil {
+			return nil, fmt.Errorf("failed to parse mounts template: %w", err)
+		}
+
+		t, err := tm.Parse(nodeUserData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse Node template: %w", err)
+		}
+
+		if err := t.Execute(&buf, input); err != nil {
+			return nil, fmt.Errorf("failed to execute node user data template: %w", err)
+		}
+	}
 	return buf.Bytes(), nil
 
 }
 
 // getNodeLabels returns the string representation of node-labels flags for nodeadm.
 func (ni *NodeInput) getNodeLabels() string {
+	var nodeLabels string
 	if ni.KubeletExtraArgs != nil {
 		if nodeLabelsValue, ok := ni.KubeletExtraArgs["node-labels"]; ok {
-			return nodeLabelsValue
+			nodeLabels = nodeLabelsValue
 		}
 	}
-	nodeLabels := make([]string, 0, 3)
-	if ni.AMIImageID != "" {
-		nodeLabels = append(nodeLabels, fmt.Sprintf(nodeLabelImage, ni.AMIImageID))
+	extraLabels := make([]string, 0, 3)
+	if ni.AMIImageID != "" && !strings.Contains(nodeLabels, nodeLabelImage) {
+		extraLabels = append(extraLabels, fmt.Sprintf(nodeLabelImage, ni.AMIImageID))
 	}
-	if ni.NodeGroupName != "" {
-		nodeLabels = append(nodeLabels, fmt.Sprintf(nodeLabelNodeGroup, ni.NodeGroupName))
+	if ni.NodeGroupName != "" && !strings.Contains(nodeLabels, nodeLabelImage) {
+		extraLabels = append(extraLabels, fmt.Sprintf(nodeLabelNodeGroup, ni.NodeGroupName))
 	}
-	nodeLabels = append(nodeLabels, fmt.Sprintf(nodeLabelCapacityType, ni.getCapacityTypeString()))
-	return strings.Join(nodeLabels, ",")
+	extraLabels = append(extraLabels, fmt.Sprintf(nodeLabelCapacityType, ni.getCapacityTypeString()))
+	if nodeLabels != "" {
+		return fmt.Sprintf("%s,%s", nodeLabels, strings.Join(extraLabels, ","))
+	}
+	return strings.Join(extraLabels, ",")
 }
 
 // getCapacityTypeString returns the string representation of the capacity type.
