@@ -211,30 +211,10 @@ func TestEKSConfigReconciler(t *testing.T) {
 		machine := newMachine(cluster, "test-machine")
 		config := newEKSConfig(machine)
 
-		// Set node type to AL2023 to trigger requeue
-		config.Spec.NodeType = "al2023"
-
-		// Create the objects in the test environment
-		g.Expect(testEnv.Client.Create(ctx, cluster)).To(Succeed())
-		g.Expect(testEnv.Client.Create(ctx, amcp)).To(Succeed())
-		g.Expect(testEnv.Client.Create(ctx, machine)).To(Succeed())
-		g.Expect(testEnv.Client.Create(ctx, config)).To(Succeed())
-
-		// Update the AMCP status to ensure it's properly set
-		createdAMCP := &ekscontrolplanev1.AWSManagedControlPlane{}
-		g.Expect(testEnv.Client.Get(ctx, client.ObjectKey{Name: amcp.Name, Namespace: amcp.Namespace}, createdAMCP)).To(Succeed())
-		createdAMCP.Status = ekscontrolplanev1.AWSManagedControlPlaneStatus{
-			Ready:       false, // Not ready because control plane is not initialized
-			Initialized: false, // Not initialized
-		}
-		g.Expect(testEnv.Client.Status().Update(ctx, createdAMCP)).To(Succeed())
-
 		reconciler := EKSConfigReconciler{
 			Client: testEnv.Client,
 		}
-
-		// Test the condition check directly using joinWorker
-		// Since TEST_ENV=true, the AL2023 control plane readiness check should be skipped
+		// Since TEST_ENV=true, the control plane readiness check should be skipped
 		result, err := reconciler.joinWorker(ctx, cluster, config, configOwner("Machine"))
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(result.Requeue).To(BeFalse())

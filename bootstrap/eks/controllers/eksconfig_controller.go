@@ -40,6 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	infrav1beta1 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta1"
+	infrav1beta2 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
 	eksbootstrapv1 "sigs.k8s.io/cluster-api-provider-aws/v2/bootstrap/eks/api/v1beta2"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/bootstrap/eks/internal/userdata"
 	ekscontrolplanev1 "sigs.k8s.io/cluster-api-provider-aws/v2/controlplane/eks/api/v1beta2"
@@ -226,14 +228,7 @@ func (r *EKSConfigReconciler) joinWorker(ctx context.Context, cluster *clusterv1
 			eksbootstrapv1.DataSecretGenerationFailedReason,
 			clusterv1.ConditionSeverityInfo, "Control plane is not initialized yet")
 
-		// For AL2023, requeue to ensure we retry when control plane is ready
-		// For AL2, follow upstream behavior and return nil
-		if config.Spec.NodeType == eksbootstrapv1.NodeTypeAL2023 {
-			log.Info("AL2023 detected, returning requeue after 30 seconds")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		log.Info("AL2 detected, returning no requeue")
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Get the AWSManagedControlPlane
@@ -242,17 +237,17 @@ func (r *EKSConfigReconciler) joinWorker(ctx context.Context, cluster *clusterv1
 		return ctrl.Result{}, errors.Wrap(err, "failed to get control plane")
 	}
 
-	// Check if control plane is ready (skip in test environments for AL2023)
-	if config.Spec.NodeType == eksbootstrapv1.NodeTypeAL2023 && !conditions.IsTrue(controlPlane, ekscontrolplanev1.EKSControlPlaneReadyCondition) {
-		// Skip control plane readiness check for AL2023 in test environment
+	// Check if control plane is ready (skip in test environments)
+	if !conditions.IsTrue(controlPlane, ekscontrolplanev1.EKSControlPlaneReadyCondition) {
+		// Skip control plane readiness check in test environment
 		if os.Getenv("TEST_ENV") != "true" {
-			log.Info("AL2023 detected, waiting for control plane to be ready")
+			log.Info("Waiting for control plane to be ready")
 			conditions.MarkFalse(config, eksbootstrapv1.DataSecretAvailableCondition,
 				eksbootstrapv1.DataSecretGenerationFailedReason,
-				clusterv1.ConditionSeverityInfo, "Control plane is not ready yet")
+				clusterv1.ConditionSeverityInfo, "Control plane is not initialized yet")
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		log.Info("Skipping control plane readiness check for AL2023 in test environment")
+		log.Info("Skipping control plane readiness check in test environment")
 	}
 	log.Info("Control plane is ready, proceeding with userdata generation")
 
@@ -269,7 +264,6 @@ func (r *EKSConfigReconciler) joinWorker(ctx context.Context, cluster *clusterv1
 		serviceCIDR = cluster.Spec.ClusterNetwork.Services.CIDRBlocks[0]
 	}
 
-	// Create unified NodeInput for both AL2 and AL2023
 	nodeInput := &userdata.NodeInput{
 		ClusterName:              controlPlane.Spec.EKSClusterName,
 		KubeletExtraArgs:         config.Spec.KubeletExtraArgs,
@@ -308,69 +302,93 @@ func (r *EKSConfigReconciler) joinWorker(ctx context.Context, cluster *clusterv1
 		nodeInput.IPFamily = ptr.To[string]("ipv6")
 	}
 
-	// Set AMI family type and AL2023-specific fields if needed
-	if config.Spec.NodeType == eksbootstrapv1.NodeTypeAL2023 {
-		log.Info("Processing AL2023 node type")
-		nodeInput.AMIFamilyType = userdata.AMIFamilyAL2023
+	// Set nodeadm-specific fields
+	nodeInput.APIServerEndpoint = controlPlane.Spec.ControlPlaneEndpoint.Host
+	nodeInput.NodeGroupName = config.Name
 
-		// Set AL2023-specific fields
-		nodeInput.APIServerEndpoint = controlPlane.Spec.ControlPlaneEndpoint.Host
-		nodeInput.NodeGroupName = config.Name
-
-		// In test environments, provide a mock CA certificate
-		if os.Getenv("TEST_ENV") == "true" {
-			log.Info("Using mock CA certificate for test environment")
-			nodeInput.CACert = "mock-ca-certificate-for-testing"
-		} else {
-			// Fetch CA cert from KubeConfig secret
-			// We already have the cluster object passed to this function
-			obj := client.ObjectKey{
-				Namespace: cluster.Namespace,
-				Name:      cluster.Name,
-			}
-			ca, err := extractCAFromSecret(ctx, r.Client, obj)
-			if err != nil {
-				log.Error(err, "Failed to extract CA from kubeconfig secret")
-				conditions.MarkFalse(config, eksbootstrapv1.DataSecretAvailableCondition,
-					eksbootstrapv1.DataSecretGenerationFailedReason,
-					clusterv1.ConditionSeverityWarning,
-					"Failed to extract CA from kubeconfig secret: %v", err)
-				return ctrl.Result{}, err
-			}
-			nodeInput.CACert = ca
-		}
-
-		// Get AMI ID from AWSManagedMachinePool's launch template if specified
-		if configOwner.GetKind() == "AWSManagedMachinePool" {
-			amp := &expinfrav1.AWSManagedMachinePool{}
-			if err := r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: configOwner.GetName()}, amp); err == nil {
-				log.Info("Found AWSManagedMachinePool", "name", amp.Name, "launchTemplate", amp.Spec.AWSLaunchTemplate != nil)
-				if amp.Spec.AWSLaunchTemplate != nil && amp.Spec.AWSLaunchTemplate.AMI.ID != nil {
-					nodeInput.AMIImageID = *amp.Spec.AWSLaunchTemplate.AMI.ID
-					log.Info("Set AMI ID from launch template", "amiID", nodeInput.AMIImageID)
-				} else {
-					log.Info("No AMI ID found in launch template")
-				}
-				if amp.Spec.CapacityType != nil {
-					nodeInput.CapacityType = amp.Spec.CapacityType
-					log.Info("Set capacity type from AWSManagedMachinePool", "capacityType", *amp.Spec.CapacityType)
-				} else {
-					log.Info("No capacity type found in AWSManagedMachinePool")
-				}
-			} else {
-				log.Info("Failed to get AWSManagedMachinePool", "error", err)
-			}
-		}
-
-		log.Info("Generating AL2023 userdata",
-			"cluster", controlPlane.Spec.EKSClusterName,
-			"endpoint", nodeInput.APIServerEndpoint)
+	// In test environments, provide a mock CA certificate
+	if os.Getenv("TEST_ENV") == "true" {
+		log.Info("Using mock CA certificate for test environment")
+		nodeInput.CACert = "mock-ca-certificate-for-testing"
 	} else {
-		nodeInput.AMIFamilyType = userdata.AMIFamilyAL2
-		log.Info("Generating standard userdata for node type", "type", config.Spec.NodeType)
+		// Fetch CA cert from KubeConfig secret
+		obj := client.ObjectKey{
+			Namespace: cluster.Namespace,
+			Name:      cluster.Name,
+		}
+		ca, err := extractCAFromSecret(ctx, r.Client, obj)
+		if err != nil {
+			log.Error(err, "Failed to extract CA from kubeconfig secret")
+			conditions.MarkFalse(config, eksbootstrapv1.DataSecretAvailableCondition,
+				eksbootstrapv1.DataSecretGenerationFailedReason,
+				clusterv1.ConditionSeverityWarning,
+				"Failed to extract CA from kubeconfig secret: %v", err)
+			return ctrl.Result{}, err
+		}
+		nodeInput.CACert = ca
 	}
 
-	// Generate userdata using unified approach
+	// Get AMI ID and capacity type from owner resource
+	switch configOwner.GetKind() {
+	case "AWSManagedMachinePool":
+		amp := &expinfrav1.AWSManagedMachinePool{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: configOwner.GetName()}, amp); err == nil {
+			log.Info("Found AWSManagedMachinePool", "name", amp.Name, "launchTemplate", amp.Spec.AWSLaunchTemplate != nil)
+			if amp.Spec.AWSLaunchTemplate != nil && amp.Spec.AWSLaunchTemplate.AMI.ID != nil {
+				nodeInput.AMIImageID = *amp.Spec.AWSLaunchTemplate.AMI.ID
+				log.Info("Set AMI ID from AWSManagedMachinePool launch template", "amiID", nodeInput.AMIImageID)
+			} else {
+				log.Info("No AMI ID found in AWSManagedMachinePool launch template")
+			}
+			if amp.Spec.CapacityType != nil {
+				nodeInput.CapacityType = amp.Spec.CapacityType
+				log.Info("Set capacity type from AWSManagedMachinePool", "capacityType", *amp.Spec.CapacityType)
+			} else {
+				log.Info("No capacity type found in AWSManagedMachinePool")
+			}
+		} else {
+			log.Info("Failed to get AWSManagedMachinePool", "error", err)
+		}
+	case "AWSMachineTemplate":
+		switch configOwner.GetAPIVersion() {
+		case infrav1beta2.GroupVersion.String():
+			awsmt := &infrav1beta2.AWSMachineTemplate{}
+			var awsMTGetErr error
+			if awsMTGetErr = r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: configOwner.GetName()}, awsmt); awsMTGetErr == nil {
+				log.Info("Found AWSMachineTemplate", "name", awsmt.Name)
+				if awsmt.Spec.Template.Spec.AMI.ID != nil {
+					nodeInput.AMIImageID = *awsmt.Spec.Template.Spec.AMI.ID
+					log.Info("Set AMI ID from AWSMachineTemplate", "amiID", nodeInput.AMIImageID)
+				} else {
+					log.Info("No AMI ID found in AWSMachineTemplate")
+				}
+			}
+				log.Info("Failed to get AWSMachineTemplate", "error", awsMTGetErr)
+			}
+		case infrav1beta1.GroupVersion.String():
+			awsmt := &infrav1beta1.AWSMachineTemplate{}
+			var awsMTGetErr error
+			if awsMTGetErr = r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: configOwner.GetName()}, awsmt); awsMTGetErr == nil {
+				log.Info("Found AWSMachineTemplate", "name", awsmt.Name)
+				if awsmt.Spec.Template.Spec.AMI.ID != nil {
+					nodeInput.AMIImageID = *awsmt.Spec.Template.Spec.AMI.ID
+					log.Info("Set AMI ID from AWSMachineTemplate", "amiID", nodeInput.AMIImageID)
+				} else {
+					log.Info("No AMI ID found in AWSMachineTemplate")
+				}
+			} else {
+				log.Info("Failed to get AWSMachineTemplate", "error", awsMTGetErr)
+			}
+		}
+	default:
+		log.Info("Config owner kind not recognized for AMI extraction", "kind", configOwner.GetKind())
+	}
+
+	log.Info("Generating nodeadm userdata",
+		"cluster", controlPlane.Spec.EKSClusterName,
+		"endpoint", nodeInput.APIServerEndpoint)
+
+	// Generate userdata using nodeadm approach
 	userDataScript, err := userdata.NewNode(nodeInput)
 	if err != nil {
 		log.Error(err, "Failed to create a worker join configuration")

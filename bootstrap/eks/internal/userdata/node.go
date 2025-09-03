@@ -34,11 +34,6 @@ const (
 	defaultBootstrapCommand = "/etc/eks/bootstrap.sh"
 	boundary                = "//"
 
-	// AMIFamilyAL2 is the Amazon Linux 2 AMI family.
-	AMIFamilyAL2 = "AmazonLinux2"
-	// AMIFamilyAL2023 is the Amazon Linux 2023 AMI family.
-	AMIFamilyAL2023 = "AmazonLinux2023"
-
 	nodeUserData = `#cloud-config
 {{template "files" .Files}}
 runcmd:
@@ -52,7 +47,7 @@ runcmd:
 {{- template "mounts" .Mounts}}
 `
 
-	// Shell script part template for AL2023.
+	// Shell script part template for nodeadm.
 	shellScriptPartTemplate = `--{{.Boundary}}
 Content-Type: text/x-shellscript; charset="us-ascii"
 
@@ -70,7 +65,7 @@ set -o nounset
 {{- end}}
 {{- end}}`
 
-	// Node config part template for AL2023.
+	// Node config part template for nodeadm.
 	nodeConfigPartTemplate = `
 --{{.Boundary}}
 Content-Type: application/node.eks.aws
@@ -93,8 +88,17 @@ spec:
       {{- end }}
     flags:
     - "--node-labels={{.NodeLabels}}"
+    {{- range $key, $value := .KubeletExtraArgs }}
+    {{- if ne $key "node-labels" }}
+    - "--{{$key}}={{$value}}"
+    {{- end }}
+    {{- end }}
 
 --{{.Boundary}}--`
+
+	nodeLabelImage        = "eks.amazonaws.com/nodegroup-image=%s"
+	nodeLabelNodeGroup    = "eks.amazonaws.com/nodegroup=%s"
+	nodeLabelCapacityType = "eks.amazonaws.com/capacityType=%s"
 )
 
 // NodeInput contains all the information required to generate user data for a node.
@@ -121,10 +125,6 @@ type NodeInput struct {
 	Users                    []eksbootstrapv1.User
 	NTP                      *eksbootstrapv1.NTP
 
-	// AMI Family Type to determine userdata format
-	AMIFamilyType string
-
-	// AL2023 specific fields
 	AMIImageID        string
 	APIServerEndpoint string
 	Boundary          string
@@ -163,71 +163,7 @@ func (ni *NodeInput) BootstrapCommand() string {
 
 // NewNode returns the user data string to be used on a node instance.
 func NewNode(input *NodeInput) ([]byte, error) {
-	// For AL2023, use the multipart MIME format
-	if input.AMIFamilyType == AMIFamilyAL2023 {
-		return generateAL2023UserData(input)
-	}
-
-	// For AL2 and other types, use the standard cloud-config format
-	return generateStandardUserData(input)
-}
-
-// generateStandardUserData generates userdata for AL2 and other standard node types.
-func generateStandardUserData(input *NodeInput) ([]byte, error) {
-	tm := template.New("Node").Funcs(defaultTemplateFuncMap)
-
-	if _, err := tm.Parse(filesTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse args template: %w", err)
-	}
-
-	if _, err := tm.Parse(argsTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse args template: %w", err)
-	}
-
-	if _, err := tm.Parse(kubeletArgsTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse kubeletExtraArgs template: %w", err)
-	}
-
-	if _, err := tm.Parse(commandsTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse commandsTemplate template: %w", err)
-	}
-
-	if _, err := tm.Parse(ntpTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse ntp template: %w", err)
-	}
-
-	if _, err := tm.Parse(usersTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse users template: %w", err)
-	}
-
-	if _, err := tm.Parse(diskSetupTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse disk setup template: %w", err)
-	}
-
-	if _, err := tm.Parse(fsSetupTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse fs setup template: %w", err)
-	}
-
-	if _, err := tm.Parse(mountsTemplate); err != nil {
-		return nil, fmt.Errorf("failed to parse mounts template: %w", err)
-	}
-
-	t, err := tm.Parse(nodeUserData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse Node template: %w", err)
-	}
-
-	var out bytes.Buffer
-	if err := t.Execute(&out, input); err != nil {
-		return nil, fmt.Errorf("failed to generate Node template: %w", err)
-	}
-
-	return out.Bytes(), nil
-}
-
-// generateAL2023UserData generates userdata for Amazon Linux 2023 nodes.
-func generateAL2023UserData(input *NodeInput) ([]byte, error) {
-	if err := validateAL2023Input(input); err != nil {
+	if err := validateNodeInput(input); err != nil {
 		return nil, err
 	}
 
@@ -256,23 +192,24 @@ func generateAL2023UserData(input *NodeInput) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+
 }
 
 // getNodeLabels returns the string representation of node-labels flags for nodeadm.
 func (ni *NodeInput) getNodeLabels() string {
 	if ni.KubeletExtraArgs != nil {
-		if _, ok := ni.KubeletExtraArgs["node-labels"]; ok {
-			return ni.KubeletExtraArgs["node-labels"]
+		if nodeLabelsValue, ok := ni.KubeletExtraArgs["node-labels"]; ok {
+			return nodeLabelsValue
 		}
 	}
 	nodeLabels := make([]string, 0, 3)
 	if ni.AMIImageID != "" {
-		nodeLabels = append(nodeLabels, fmt.Sprintf("eks.amazonaws.com/nodegroup-image=%s", ni.AMIImageID))
+		nodeLabels = append(nodeLabels, fmt.Sprintf(nodeLabelImage, ni.AMIImageID))
 	}
 	if ni.NodeGroupName != "" {
-		nodeLabels = append(nodeLabels, fmt.Sprintf("eks.amazonaws.com/nodegroup=%s", ni.NodeGroupName))
+		nodeLabels = append(nodeLabels, fmt.Sprintf(nodeLabelNodeGroup, ni.NodeGroupName))
 	}
-	nodeLabels = append(nodeLabels, fmt.Sprintf("eks.amazonaws.com/capacityType=%s", ni.getCapacityTypeString()))
+	nodeLabels = append(nodeLabels, fmt.Sprintf(nodeLabelCapacityType, ni.getCapacityTypeString()))
 	return strings.Join(nodeLabels, ",")
 }
 
@@ -291,19 +228,19 @@ func (ni *NodeInput) getCapacityTypeString() string {
 	}
 }
 
-// validateAL2023Input validates the input for AL2023 user data generation.
-func validateAL2023Input(input *NodeInput) error {
+// validateNodeInput validates the input for nodeadm user data generation.
+func validateNodeInput(input *NodeInput) error {
 	if input.APIServerEndpoint == "" {
-		return fmt.Errorf("API server endpoint is required for AL2023")
+		return fmt.Errorf("API server endpoint is required for nodeadm")
 	}
 	if input.CACert == "" {
-		return fmt.Errorf("CA certificate is required for AL2023")
+		return fmt.Errorf("CA certificate is required for nodeadm")
 	}
 	if input.ClusterName == "" {
-		return fmt.Errorf("cluster name is required for AL2023")
+		return fmt.Errorf("cluster name is required for nodeadm")
 	}
 	if input.NodeGroupName == "" {
-		return fmt.Errorf("node group name is required for AL2023")
+		return fmt.Errorf("node group name is required for nodeadm")
 	}
 
 	if input.MaxPods == nil {
@@ -322,7 +259,7 @@ func validateAL2023Input(input *NodeInput) error {
 	}
 	input.NodeLabels = input.getNodeLabels()
 
-	klog.V(2).Infof("AL2023 Userdata Generation - maxPods: %d, node-labels: %s",
+	klog.V(2).Infof("Nodeadm Userdata Generation - maxPods: %d, node-labels: %s",
 		*input.MaxPods, input.NodeLabels)
 
 	return nil
