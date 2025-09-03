@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	infrav1beta1 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta1"
 	infrav1beta2 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
 	eksbootstrapv1 "sigs.k8s.io/cluster-api-provider-aws/v2/bootstrap/eks/api/v1beta2"
 	"sigs.k8s.io/cluster-api-provider-aws/v2/bootstrap/eks/internal/userdata"
@@ -350,36 +349,18 @@ func (r *EKSConfigReconciler) joinWorker(ctx context.Context, cluster *clusterv1
 			log.Info("Failed to get AWSManagedMachinePool", "error", err)
 		}
 	case "AWSMachineTemplate":
-		switch configOwner.GetAPIVersion() {
-		case infrav1beta2.GroupVersion.String():
-			awsmt := &infrav1beta2.AWSMachineTemplate{}
-			var awsMTGetErr error
-			if awsMTGetErr = r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: configOwner.GetName()}, awsmt); awsMTGetErr == nil {
-				log.Info("Found AWSMachineTemplate", "name", awsmt.Name)
-				if awsmt.Spec.Template.Spec.AMI.ID != nil {
-					nodeInput.AMIImageID = *awsmt.Spec.Template.Spec.AMI.ID
-					log.Info("Set AMI ID from AWSMachineTemplate", "amiID", nodeInput.AMIImageID)
-				} else {
-					log.Info("No AMI ID found in AWSMachineTemplate")
-				}
-			}
-				log.Info("Failed to get AWSMachineTemplate", "error", awsMTGetErr)
-			}
-		case infrav1beta1.GroupVersion.String():
-			awsmt := &infrav1beta1.AWSMachineTemplate{}
-			var awsMTGetErr error
-			if awsMTGetErr = r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: configOwner.GetName()}, awsmt); awsMTGetErr == nil {
-				log.Info("Found AWSMachineTemplate", "name", awsmt.Name)
-				if awsmt.Spec.Template.Spec.AMI.ID != nil {
-					nodeInput.AMIImageID = *awsmt.Spec.Template.Spec.AMI.ID
-					log.Info("Set AMI ID from AWSMachineTemplate", "amiID", nodeInput.AMIImageID)
-				} else {
-					log.Info("No AMI ID found in AWSMachineTemplate")
-				}
+		awsmt := &infrav1beta2.AWSMachineTemplate{}
+		var awsMTGetErr error
+		if awsMTGetErr = r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: configOwner.GetName()}, awsmt); awsMTGetErr == nil {
+			log.Info("Found AWSMachineTemplate", "name", awsmt.Name)
+			if awsmt.Spec.Template.Spec.AMI.ID != nil {
+				nodeInput.AMIImageID = *awsmt.Spec.Template.Spec.AMI.ID
+				log.Info("Set AMI ID from AWSMachineTemplate", "amiID", nodeInput.AMIImageID)
 			} else {
-				log.Info("Failed to get AWSMachineTemplate", "error", awsMTGetErr)
+				log.Info("No AMI ID found in AWSMachineTemplate")
 			}
 		}
+		log.Info("Failed to get AWSMachineTemplate", "error", awsMTGetErr)
 	default:
 		log.Info("Config owner kind not recognized for AMI extraction", "kind", configOwner.GetKind())
 	}
