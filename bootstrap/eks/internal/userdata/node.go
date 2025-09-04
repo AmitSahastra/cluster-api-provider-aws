@@ -47,7 +47,7 @@ runcmd:
 {{- template "disk_setup" .DiskSetup}}
 {{- template "fs_setup" .DiskSetup}}
 {{- template "mounts" .Mounts}}
---{{.Boundary}}--`
+--{{.Boundary}}`
 
 	// Shell script part template for nodeadm.
 	shellScriptPartTemplate = `
@@ -70,7 +70,7 @@ set -o nounset
 {{.}}
 {{- end}}
 {{- end}}
---{{ .Boundary }}--`
+--{{ .Boundary }}`
 
 	// Node config part template for nodeadm.
 	nodeConfigPartTemplate = `
@@ -101,7 +101,7 @@ spec:
     {{- end }}
     {{- end }}
 
---{{.Boundary}}--`
+--{{.Boundary}}`
 
 	nodeLabelImage        = "eks.amazonaws.com/nodegroup-image=%s"
 	nodeLabelNodeGroup    = "eks.amazonaws.com/nodegroup=%s"
@@ -216,6 +216,8 @@ func NewNode(input *NodeInput) ([]byte, error) {
 			return nil, fmt.Errorf("failed to execute node user data template: %w", err)
 		}
 	}
+	// write the final boundry closing, all of the ones in the script use intermediate boundries
+	buf.Write([]byte("--"))
 	return buf.Bytes(), nil
 
 }
